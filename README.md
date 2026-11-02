@@ -1,6 +1,6 @@
 # OCI Provisioner Portal
 
-A small Flask web UI for launching OCI Always Free instances with optional Telegram alerts. It is designed to run as **one Gunicorn worker** on Railway or a low-spec VPS.
+A small Flask web UI for launching OCI Always Free instances with optional Telegram alerts. It is designed to run as **one Gunicorn worker** on Railway, Fly.io, or a low-spec VPS.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/new?utm_medium=integration&utm_source=button&utm_campaign=generic)
 
@@ -15,7 +15,96 @@ The container uses one worker and two threads. This is deliberate: the provision
 
 There is **exactly one provisioning-loop slot per service**. A second start request is refused while a loop is running in the background — even when it arrives from another browser with a *different* OCI key, region or shape — and the refusal is written to the live log so the reason is visible in the UI terminal and on Telegram. See [One loop at a time](#one-loop-at-a-time).
 
+## Deploy on Fly.io
+
+The repository ships a Fly.io-ready `fly.toml`: it builds the included Dockerfile, enforces
+HTTPS at Fly's proxy, probes `/healthz`, and keeps exactly one always-on Machine. Nothing is
+written to disk, so **no volume is required**.
+
+```bash
+flyctl auth login
+fly apps create oci-sniper                     # skip if it already exists
+fly secrets set APP_PASSWORD='choose-a-long-password'
+fly deploy --ha=false                          # one Machine; builds the Dockerfile
+fly open                                       # or: fly status && fly logs
+```
+
+If `oci-sniper` is taken, create a differently named app and change `app = 'oci-sniper'` in
+`fly.toml` to match — `fly deploy` will not create an app for you. `fly launch --no-deploy`
+works too: keep the checked-in `fly.toml` when it offers to tweak settings, and decline the
+Postgres/Redis/volume add-ons, since this app needs none of them.
+
+What the shipped configuration does, and why:
+
+- **`[env] PORT = '8080'` must equal `[http_service] internal_port`.** Fly does not inject
+  `PORT` (Railway does), and Gunicorn binds whatever `PORT` says. If those two drift apart the
+  Machine boots happily but Fly's proxy has no listener, and the app looks dead — this is the
+  single most common Fly misconfiguration for this app. Both are `8080` here.
+- **`auto_stop_machines = 'off'` with `min_machines_running = 1`.** The provisioning loop, the
+  live log and the boot-disk job are *process memory*. Fly's scale-to-zero would stop the
+  Machine minutes after the last request and take the hunt with it. Do not turn auto-stop back
+  on unless you accept that.
+- **`[[http_service.checks]]` on `/healthz`.** The check is unauthenticated and cheap, so it
+  keeps working with `APP_PASSWORD` set. Fly only routes traffic to a Machine that passes it.
+- **`[[vm]] 512 MB / 1 shared CPU`.** Flask + Gunicorn + the lazily imported OCI SDK are ~60 MB
+  resident before a request, with peaks during a boot-volume scan. 512 MB is comfortable;
+  256 MB is the floor, not the target.
+- **`KEEPALIVE_ENABLED = 'false'`.** The anti-sleep pinger exists for Railway's Serverless
+  mode. With auto-stop off, Fly never pauses the Machine, so the pinger is noise. If you
+  *do* deliberately enable auto-stop to save money, set `KEEPALIVE_ENABLED = 'true'` and
+  `KEEPALIVE_URLS = 'https://<your-app>.fly.dev/healthz'` so the outbound ping keeps the
+  Machine awake (and remember a stopped Machine still loses the running loop).
+
+Operational notes:
+
+- **Run exactly one Machine, with one Gunicorn worker.** Fly creates **two** Machines by default
+  on a first deploy — `fly deploy --ha=false` (used above and in the workflow) creates one
+  instead. `fly machine list` should show exactly one row. A second Machine means a second loop
+  slot, a second status/log store, and a UI that shows whichever Machine the proxy picked; fix
+  it with `fly scale count 1`.
+- **The `--ha=false` flag only applies to creation.** If two Machines already exist (for
+  example from an earlier `fly deploy`), remove one with `fly machine destroy <id>` or run
+  `fly scale count 1` before starting a hunt.
+- **Every `fly deploy`, `fly apps restart`, or `fly machine stop/start` resets the in-memory
+  loop** (and its logs). Start the hunt again from the UI afterwards. Deploys cannot preserve
+  in-process state, by design — there is no database to migrate state into.
+- **`APP_PASSWORD` belongs in `fly secrets set`, not `[env]`.** `[env]` values are plain text in
+  `fly.toml` and visible in `fly config show`; secrets are injected at boot and can be rotated
+  with `fly secrets set APP_PASSWORD='…'` (which triggers a rolling restart).
+- **Region:** `primary_region = 'sin'` (Singapore) is the closest Fly region to Cambodia.
+  Change it to sit next to the OCI region you hunt in (`nrt`, `hkg`, `bom`, `syd`, `fra`, `ams`,
+  …) — the app only talks to the public OCI API, so it works from any region, just with more
+  round-trip latency. `fly regions list` shows the options; one Machine in one region is all
+  this app ever needs.
+- **HTTPS and headers:** Fly terminates TLS and redirects with `force_https = true`; the app
+  still sends HSTS. Custom domains (`fly certs add …`) work without changes.
+- **Outbound access:** the Machine reaches the OCI API and Telegram over the public internet
+  with Fly's shared IPv4 — no IP allow-listing is needed on the OCI side, and OCI API keys are
+  pasted into the UI per request (never stored server-side).
+- **Diagnostics:** `fly logs` (Gunicorn/stdout, keep-alive and loop lines), `fly status`,
+  `fly checks list`, `fly ssh console`, and `curl https://<app>.fly.dev/healthz`.
+
+### Deploy from GitHub Actions (optional)
+
+`.github/workflows/fly-deploy.yml` deploys on every push to `main` (and on manual dispatch)
+once you add a repository secret:
+
+```bash
+fly tokens create deploy -x 999999h     # deploy-scoped token
+gh secret set FLY_API_TOKEN --repo <owner>/<repo>
+```
+
+Without the secret the workflow skips itself instead of failing. Tokens are per-app, so rotate
+them with `fly tokens revoke` when you no longer need CI deploys.
+
+
 ## Staying awake 24/7 (Railway sleeping)
+
+> On Fly.io this section does not apply: the shipped `fly.toml` turns auto-stop off and keeps
+> one Machine running, so the pinger is disabled there (`KEEPALIVE_ENABLED = 'false'`). The rest
+> of this section is the Railway story; the pinger also works on any host if you point
+> `KEEPALIVE_URLS` at it (on Fly, `FLY_APP_NAME` is picked up automatically as
+> `https://<app>.fly.dev/healthz`).
 
 Railway's **Serverless** feature (formerly *App Sleeping*) pauses a service when it stops
 seeing **outbound** traffic for at least 5 minutes (in practice 5–10, sampled on an
@@ -138,17 +227,17 @@ export APP_PASSWORD='choose-a-long-password'
 gunicorn -c gunicorn.conf.py app:app
 ```
 
-For a systemd or reverse-proxy setup, point the proxy at `127.0.0.1:5000`. The application itself binds to `0.0.0.0` when run by Gunicorn so the same command works in a container. Put TLS in Railway or in the VPS reverse proxy; do not expose an unauthenticated instance to the public internet.
+For a systemd or reverse-proxy setup, point the proxy at `127.0.0.1:5000`. The application itself binds to `0.0.0.0` when run by Gunicorn so the same command works in a container. Put TLS in Railway, Fly.io's proxy or the VPS reverse proxy; do not expose an unauthenticated instance to the public internet.
 
 ## Environment variables
 
 | Variable | Default | Description |
 | --- | ---: | --- |
 | `APP_PASSWORD` | empty | Basic Auth password. Set this in production. |
-| `PORT` | `5000` | Supplied by Railway or used locally. |
+| `PORT` | `5000` | Port Gunicorn binds. Supplied by Railway; `fly.toml` sets `8080` on Fly.io; `5000` locally. |
 | `MAX_ATTEMPTS` | `100` | Hard ceiling for one provisioning loop; bounded to 1–100000. The high ceiling supports genuine 24/7 hunting (~69 days at a 60s delay); the default stays conservative. Per-loop you can set **Max attempts** to any value from 1 up to `MAX_ATTEMPTS`, or flip the **Unlimited** toggle to hunt until success or a stop — never auto-exiting on a retry limit. |
-| `KEEPALIVE_ENABLED` | `true` | Send periodic outbound pings so Railway's Serverless/App-Sleeping never pauses the service. Set `false` to disable. |
-| `KEEPALIVE_URLS` | auto | Comma-separated http(s) URLs to ping. Auto-defaults to this app's own `https://$RAILWAY_PUBLIC_DOMAIN/healthz`, so on Railway it usually needs nothing. |
+| `KEEPALIVE_ENABLED` | `true` | Send periodic outbound pings so Railway's Serverless/App-Sleeping never pauses the service. Set `false` to disable; the shipped `fly.toml` sets `false` because Fly keeps the Machine running. |
+| `KEEPALIVE_URLS` | auto | Comma-separated http(s) URLs to ping. Auto-defaults to this app's own `https://$RAILWAY_PUBLIC_DOMAIN/healthz` on Railway or `https://$FLY_APP_NAME.fly.dev/healthz` on Fly.io, so on those hosts it usually needs nothing. |
 | `KEEPALIVE_INTERVAL_SECONDS` | `240` | Seconds between pings; bounded to 30–295 so it always beats Railway's ≥5-minute idle window. |
 | `KEEPALIVE_TIMEOUT_SECONDS` | `10` | Per-ping HTTP timeout; bounded to 2–30. |
 | `OCI_API_SLOTS` | `2` | Maximum concurrent OCI jobs/requests in the process; bounded to 1–8. |
@@ -159,7 +248,7 @@ For a systemd or reverse-proxy setup, point the proxy at `127.0.0.1:5000`. The a
 | `ALLOW_IFRAME_PREVIEW` | `false` | Drop the `X-Frame-Options: DENY` header so the UI can run inside a hosted preview iframe. Off by default: production keeps `DENY`. |
 | `DEMO_CAPACITY_AFTER_ATTEMPTS` | `3` | Demo mode only: attempt number that finally succeeds; earlier attempts fail with `OutOfHostCapacity`. |
 
-The provisioning loop is intentionally in memory. A Railway restart, redeploy, or VPS process restart stops it; start it again from the UI.
+The provisioning loop is intentionally in memory. A Railway restart, a Fly.io redeploy/Machine restart, or a VPS process restart stops it; start it again from the UI.
 With the 24/7 keep-alive enabled (see below), the host no longer pauses the service, so a running loop keeps going around the clock. This avoids a database/queue dependency and keeps the service lightweight.
 
 ## Features
@@ -178,8 +267,8 @@ With the 24/7 keep-alive enabled (see below), the host no longer pauses the serv
 - Telegram attempt updates with attempt number, OCI email, region/AD, and safe key fingerprint (never the private key)
 - Optional Telegram success/failure alerts and throttled live logs
 - Firewall/security-list and NSG inspection helpers
-- `/healthz` health check for Railway, Docker and systemd
-- 24/7 keep-alive pinger that stops Railway's Serverless/App-Sleeping from pausing the service
+- `/healthz` health check for Railway, Fly.io, Docker and systemd
+- 24/7 keep-alive pinger that stops Railway's Serverless/App-Sleeping from pausing the service (not needed on Fly.io, where `fly.toml` keeps the Machine running)
 
 ## API endpoints
 
@@ -208,12 +297,12 @@ With the 24/7 keep-alive enabled (see below), the host no longer pauses the serv
 ## Resource choices
 
 - No Redis, database, task queue, frontend build, or monitoring agent is required.
-- The Docker image uses `python:3.12-slim-bookworm`, published Python wheels, a non-root user, and no runtime compiler toolchain.
+- The Docker image uses `python:3.12-slim-bookworm`, published Python wheels, a non-root user, and no runtime compiler toolchain. It runs as-is on Railway, Fly.io (512 MB shared-1x) and any VPS.
 - Gunicorn access logging is disabled because the browser polls status/log endpoints; application errors still go to stdout/stderr.
 - The browser polls logs every five seconds only while provisioning and checks status every ten seconds, reducing idle requests.
 
 ## Security notes
 
-- Set `APP_PASSWORD` and terminate HTTPS at Railway or a reverse proxy.
+- Set `APP_PASSWORD`; terminate HTTPS at Railway, at Fly.io's proxy (`force_https` in `fly.toml`), or at a reverse proxy.
 - OCI private keys and Telegram tokens are submitted for API calls but are not persisted to disk or included in the quota cache.
 - The UI is intended for one operator. Do not run multiple Gunicorn workers or replicas unless process state is moved to a shared store.

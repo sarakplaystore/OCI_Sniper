@@ -483,9 +483,27 @@ KEEPALIVE_MIN_INTERVAL = 30
 KEEPALIVE_MAX_INTERVAL = 295
 KEEPALIVE_FAIL_LOG_SECONDS = 300
 
-# Railway injects RAILWAY_PUBLIC_DOMAIN once the service has a public domain;
-# older templates may expose RAILWAY_STATIC_URL instead.
+# Hosts that hand the app its own public hostname:
+#   Railway — RAILWAY_PUBLIC_DOMAIN (older templates: RAILWAY_STATIC_URL), a
+#             full hostname, available once the service has a public domain.
+#   Fly.io  — FLY_APP_NAME, only the *app name*; its default hostname is
+#             <app>.fly.dev. Custom domains are not discoverable, so point
+#             KEEPALIVE_URLS at one if that is all you use.
 _KEEPALIVE_DOMAIN_VARS = ('RAILWAY_PUBLIC_DOMAIN', 'RAILWAY_STATIC_URL')
+_KEEPALIVE_FLY_APP_VAR = 'FLY_APP_NAME'
+
+
+def _keepalive_self_domain():
+    """Best guess at this app's own public hostname, or '' when unknown."""
+    for var in _KEEPALIVE_DOMAIN_VARS:
+        domain = os.environ.get(var, '').strip()
+        if domain:
+            return domain
+    fly_app = os.environ.get(_KEEPALIVE_FLY_APP_VAR, '').strip()
+    if not fly_app:
+        return ''
+    # Fly exposes a bare app name, so build the default hostname from it.
+    return fly_app if '://' in fly_app else fly_app + '.fly.dev'
 
 
 def _parse_keepalive_urls(raw):
@@ -505,18 +523,14 @@ def _default_keepalive_urls():
     urls = _parse_keepalive_urls(os.environ.get('KEEPALIVE_URLS', ''))
     if urls:
         return urls
-    for var in _KEEPALIVE_DOMAIN_VARS:
-        domain = os.environ.get(var, '').strip()
-        if not domain:
-            continue
-        if '://' in domain:
-            candidate = domain.rstrip('/') + '/healthz'
-        else:
-            candidate = 'https://%s/healthz' % domain
-        parsed = _parse_keepalive_urls(candidate)
-        if parsed:
-            return parsed
-    return []
+    domain = _keepalive_self_domain()
+    if not domain:
+        return []
+    if '://' in domain:
+        candidate = domain.rstrip('/') + '/healthz'
+    else:
+        candidate = 'https://%s/healthz' % domain
+    return _parse_keepalive_urls(candidate)
 
 
 _keepalive_lock = threading.Lock()
@@ -603,9 +617,9 @@ def keepalive_ping_once():
             if now - stats['last_fail_log'] >= KEEPALIVE_FAIL_LOG_SECONDS:
                 stats['last_fail_log'] = now
                 _keepalive_log(
-                    'ping failed (%s). On Railway, make sure the service has a '
-                    'public domain (it sets RAILWAY_PUBLIC_DOMAIN automatically) '
-                    'or set KEEPALIVE_URLS.' % first_error
+                    'ping failed (%s). Check that this app has a public '
+                    'hostname (Railway sets RAILWAY_PUBLIC_DOMAIN, Fly.io sets '
+                    'FLY_APP_NAME) or set KEEPALIVE_URLS.' % first_error
                 )
 
 
@@ -709,9 +723,9 @@ def keepalive_boot():
         print('Keep-alive: configuration error: %s' % error)
     elif KEEPALIVE_ENABLED_DEFAULT and not _keepalive_cfg['urls']:
         print(
-            'Keep-alive: enabled but no target URL is known yet. On Railway, '
-            'generate a public domain (it provides RAILWAY_PUBLIC_DOMAIN) or '
-            'set KEEPALIVE_URLS. You can also configure targets from the UI.'
+            'Keep-alive: enabled but no target URL is known yet. Give the app a '
+            'public hostname (Railway sets RAILWAY_PUBLIC_DOMAIN, Fly.io sets '
+            'FLY_APP_NAME), set KEEPALIVE_URLS, or configure targets in the UI.'
         )
 
 

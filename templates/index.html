@@ -615,7 +615,7 @@
             </button>
             <div id="kaBody" class="panel-body collapsed">
                 <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;line-height:1.5;">
-                    Railway pauses a service ~5&ndash;10 minutes after its last <b>outbound</b> traffic when "Serverless" (App Sleeping) is on &mdash; inbound visits alone don't count. This pinger sends a tiny outbound request every few minutes (by default to this app's own /healthz) so the provisioning loop can keep hunting 24/7 without the service being put to sleep.
+                    Railway pauses a service ~5&ndash;10 minutes after its last <b>outbound</b> traffic when "Serverless" (App Sleeping) is on &mdash; inbound visits alone don't count. This pinger sends a tiny outbound request every few minutes (by default to this app's own /healthz) so the provisioning loop can keep hunting 24/7 without the service being put to sleep. On Fly.io the shipped <code>fly.toml</code> disables auto-stop instead, so this is normally left off there.
                 </div>
                 <div class="checkbox-row">
                     <input type="checkbox" id="kaEnabled" onchange="onKeepaliveToggle(this.checked)">
@@ -2103,7 +2103,7 @@
             badge.className = 'status-badge stopped';
             dot.className = 'status-dot';
             text.textContent = 'No target';
-            statusEl.textContent = 'No target URL yet. On Railway, give the service a public domain (it then sets RAILWAY_PUBLIC_DOMAIN automatically) or enter target URLs below.';
+            statusEl.textContent = 'No target URL yet. Give the app a public hostname (Railway sets RAILWAY_PUBLIC_DOMAIN, Fly.io sets FLY_APP_NAME), or enter target URLs below.';
         } else {
             const failing = (ka.consecutive_failures || 0) > 0;
             badge.className = failing ? 'status-badge stopped' : 'status-badge running';
