@@ -34,6 +34,22 @@ If `oci-sniper` is taken, create a differently named app and change `app = 'oci-
 works too: keep the checked-in `fly.toml` when it offers to tweak settings, and decline the
 Postgres/Redis/volume add-ons, since this app needs none of them.
 
+Both paths are wrapped in one idempotent script that also verifies the result:
+
+```bash
+bash scripts/fly-deploy.sh                # or: bash scripts/fly-deploy.sh <app-name>
+```
+
+It checks flyctl and your login, creates the app if missing, stores `APP_PASSWORD` as a secret
+(prompted, never in argv or shell history), deploys one Machine, scales back to one if the app
+somehow has more, and waits for `https://<app>.fly.dev/healthz` to answer. Rerunning it is safe.
+
+> **Bot rewrites:** the Fly.io launcher can reopen a *"Fly.io Launch config files"* PR that
+> regenerates `fly.toml`. Review those diffs rather than merging blindly — a regenerated file
+> has already reintroduced a contradictory `[[vm]] memory_mb` next to `memory` and moved
+> `primary_region` back to `ams`. `tests/test_fly_deploy.py` now fails CI when that happens, so a
+> bot merge cannot silently degrade the deployment.
+
 What the shipped configuration does, and why:
 
 - **`[env] PORT = '8080'` must equal `[http_service] internal_port`.** Fly does not inject

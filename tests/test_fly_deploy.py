@@ -32,6 +32,18 @@ FLY_CONFIG = tomllib.loads((ROOT / 'fly.toml').read_text(encoding='utf-8'))
 HTTP_SERVICE = FLY_CONFIG.get('http_service', {})
 
 
+def _seconds(value):
+    """Parse Fly duration-ish values: 30, '30s', '1m'."""
+    if isinstance(value, int):
+        return value
+    text = str(value).strip().lower()
+    match = re.fullmatch(r'(\d+)\s*([smh]?)', text)
+    if not match:
+        raise AssertionError('unparseable duration: %r' % value)
+    amount, unit = int(match.group(1)), match.group(2)
+    return amount * {'': 1, 's': 1, 'm': 60, 'h': 3600}[unit]
+
+
 def _megabytes(value):
     """Parse Fly memory values: '512mb', '1gb', or a bare number of MB."""
     if isinstance(value, int):
@@ -115,7 +127,8 @@ class FlyConfigTests(unittest.TestCase):
                 '%s is a top-level option and must appear before the [[vm]] block' % key,
             )
         if 'kill_timeout' in FLY_CONFIG:
-            self.assertGreaterEqual(int(FLY_CONFIG['kill_timeout']), 30)
+            # flyctl accepts 30 or '30s'; either way it must outlast Gunicorn's drain.
+            self.assertGreaterEqual(_seconds(FLY_CONFIG['kill_timeout']), 30)
 
     def test_single_process_group(self):
         http_processes = HTTP_SERVICE.get('processes')
@@ -130,14 +143,21 @@ class FlyConfigTests(unittest.TestCase):
         self.assertNotIn('mounts', FLY_CONFIG)
         self.assertNotIn('[mounts]', (ROOT / 'fly.toml').read_text(encoding='utf-8'))
 
-    def test_doctor_script_is_executable_and_valid(self):
-        script = ROOT / 'scripts' / 'fly-doctor.sh'
-        self.assertTrue(script.is_file(), 'scripts/fly-doctor.sh is the one-command diagnosis')
-        self.assertTrue(os.access(script, os.X_OK), 'chmod +x scripts/fly-doctor.sh')
-        result = subprocess.run(
-            ['bash', '-n', str(script)], capture_output=True, text=True
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_helper_scripts_are_executable_and_valid(self):
+        for name in ('fly-doctor.sh', 'fly-deploy.sh'):
+            script = ROOT / 'scripts' / name
+            self.assertTrue(script.is_file(), 'missing scripts/%s' % name)
+            self.assertTrue(os.access(script, os.X_OK), 'chmod +x scripts/%s' % name)
+            result = subprocess.run(
+                ['bash', '-n', str(script)], capture_output=True, text=True
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        deploy = (ROOT / 'scripts' / 'fly-deploy.sh').read_text(encoding='utf-8')
+        self.assertIn('--ha=false', deploy, 'the script must create a single Machine')
+        # The password must not appear in argv or shell history.
+        self.assertIn('secrets import', deploy)
+        self.assertNotIn('secrets set APP_PASSWORD="$', deploy)
 
     def test_deploy_workflow_exists_and_is_secret_gated(self):
         workflow = ROOT / '.github' / 'workflows' / 'fly-deploy.yml'
