@@ -13,8 +13,11 @@ No network access is needed.
 
     python -m unittest tests.test_fly_deploy -v
 """
+import contextlib
+import io
 import os
 import re
+import subprocess
 import tomllib
 import unittest
 from pathlib import Path
@@ -127,6 +130,15 @@ class FlyConfigTests(unittest.TestCase):
         self.assertNotIn('mounts', FLY_CONFIG)
         self.assertNotIn('[mounts]', (ROOT / 'fly.toml').read_text(encoding='utf-8'))
 
+    def test_doctor_script_is_executable_and_valid(self):
+        script = ROOT / 'scripts' / 'fly-doctor.sh'
+        self.assertTrue(script.is_file(), 'scripts/fly-doctor.sh is the one-command diagnosis')
+        self.assertTrue(os.access(script, os.X_OK), 'chmod +x scripts/fly-doctor.sh')
+        result = subprocess.run(
+            ['bash', '-n', str(script)], capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_deploy_workflow_exists_and_is_secret_gated(self):
         workflow = ROOT / '.github' / 'workflows' / 'fly-deploy.yml'
         self.assertTrue(workflow.is_file())
@@ -134,6 +146,11 @@ class FlyConfigTests(unittest.TestCase):
         self.assertIn('FLY_API_TOKEN', text)
         self.assertIn('flyctl deploy', text)
         self.assertIn('--ha=false', text, 'deploy must create a single Machine')
+        # A green run that deployed nothing hid a dead public URL once already.
+        self.assertIn('exit 1', text)
+        self.assertIn('FLY_API_TOKEN is missing', text)
+        # And a successful deploy must prove the public URL actually answers.
+        self.assertIn('fly.dev/healthz', text)
         # A missing token must skip, not fail.
         self.assertIn("env.FLY_API_TOKEN != ''", text)
 
@@ -197,6 +214,43 @@ class FlyKeepaliveTests(unittest.TestCase):
             'FLY_APP_NAME': '',
         }):
             self.assertEqual(app._keepalive_self_domain(), '')
+
+
+class FlyStartupHintTests(unittest.TestCase):
+    """`fly logs` must reveal the classic port mismatch instead of a silent 503."""
+
+    def _hint(self, env):
+        base = {
+            'FLY_APP_NAME': '',
+            'FLY_MACHINE_ID': '',
+            'FLY_REGION': '',
+            'PORT': '',
+        }
+        base.update(env)
+        buffer = io.StringIO()
+        with mock.patch.dict(os.environ, base):
+            with contextlib.redirect_stdout(buffer):
+                app.log_deployment_hints()
+        return buffer.getvalue()
+
+    def test_warns_when_port_is_unset(self):
+        out = self._hint({'FLY_APP_NAME': 'oci-sniper', 'PORT': ''})
+        self.assertIn('PORT is not set', out)
+        self.assertIn('internal_port', out)
+
+    def test_reports_app_machine_region_and_port(self):
+        out = self._hint({
+            'FLY_APP_NAME': 'oci-sniper',
+            'FLY_MACHINE_ID': '148ed4',
+            'FLY_REGION': 'sin',
+            'PORT': '8080',
+        })
+        self.assertIn('port 8080', out)
+        self.assertIn('sin', out)
+        self.assertIn('148ed4', out)
+
+    def test_silent_away_from_fly(self):
+        self.assertEqual(self._hint({'FLY_APP_NAME': '', 'PORT': '8080'}), '')
 
 
 if __name__ == '__main__':
