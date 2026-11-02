@@ -1,9 +1,17 @@
 # fly.toml — OCI Provisioner Portal on Fly.io
 #
-# Ship it:
+# Ship it (one command, idempotent):
+#   bash scripts/fly-deploy.sh
+#
+# or by hand:
 #   fly apps create oci-sniper   # skip if the app already exists
 #   fly secrets set APP_PASSWORD='choose-a-long-password'
-#   fly deploy --ha=false      # one Machine: Fly creates two by default
+#   fly deploy --ha=false        # one Machine: Fly creates two by default
+#
+# The Fly.io launcher bot can reopen a "Fly.io Launch config files" PR that
+# regenerates this file. Review those diffs instead of merging blindly: a
+# regenerated version has already reintroduced a contradictory [[vm]] memory_mb
+# and moved primary_region. tests/test_fly_deploy.py fails if that happens.
 #
 # Two rules drive this file, and both come from the app's design:
 #
