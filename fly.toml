@@ -1,72 +1,37 @@
-# fly.toml — OCI Provisioner Portal on Fly.io
+# fly.toml app configuration file generated for oci-sniper on 2026-11-02T02:46:03Z
 #
-# Ship it:
-#   fly apps create oci-sniper   # skip if the app already exists
-#   fly secrets set APP_PASSWORD='choose-a-long-password'
-#   fly deploy --ha=false      # one Machine: Fly creates two by default
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
-# Two rules drive this file, and both come from the app's design:
-#
-#   1. The provisioning loop, its logs and the boot-disk job live in *process
-#      memory*. If the Machine stops, the hunt stops. So auto-stop is OFF and
-#      at least one Machine always runs.
-#   2. The loop is per process, so the app must run exactly ONE Machine with
-#      ONE Gunicorn worker. Fly creates two Machines by default, hence
-#      `fly deploy --ha=false`; never `fly scale count 2`, which would give you
-#      two independent loop slots and two sets of status/logs.
-#
-# See https://fly.io/docs/reference/configuration/ for every option below.
 
 app = 'oci-sniper'
-# Nearest Fly region to Cambodia. Move it next to the OCI region you hunt in
-# (`sin`, `nrt`, `hkg`, `bom`, `syd`, `fra`, `ams`, …) to keep OCI round trips
-# short; the UI works from any region.
-primary_region = 'sin'
-
-# Top-level, so it must stay ABOVE the first [table]: give Gunicorn time to
-# finish in-flight requests (graceful_timeout = 30s) instead of being killed a
-# few seconds into a deploy.
-kill_timeout = 30
+primary_region = 'ams'
+kill_timeout = '30s'
 
 [build]
   dockerfile = 'Dockerfile'
 
 [env]
-  # Gunicorn binds $PORT (see gunicorn.conf.py). Fly does NOT inject PORT, so it
-  # is set here and MUST match http_service.internal_port below, otherwise the
-  # proxy has no listener to talk to and the app looks dead.
-  PORT = '8080'
-  LOG_LEVEL = 'info'
-  # Fly machines are kept running 24/7 by auto_stop_machines = 'off' below, so
-  # the Railway-style anti-sleep pinger is not needed. If you deliberately turn
-  # auto-stop back on to save money, set this to 'true' and add
-  #   KEEPALIVE_URLS = 'https://<your-app>.fly.dev/healthz'
-  # — but understand that a stopped Machine still loses the running loop.
   KEEPALIVE_ENABLED = 'false'
+  LOG_LEVEL = 'info'
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  # Never scale to zero: stopping the Machine kills the in-memory provisioning
-  # loop ("scale-to-zero" is wrong for this app).
   auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
   processes = ['app']
 
-  # Fly only routes traffic to a Machine that passes this check. /healthz is
-  # unauthenticated and cheap, so it works with APP_PASSWORD set.
   [[http_service.checks]]
-    grace_period = '20s'
     interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
     method = 'GET'
     path = '/healthz'
-    timeout = '5s'
 
 [[vm]]
-  # Flask + Gunicorn + the lazily imported OCI SDK sit around 60 MB resident,
-  # with headroom for a boot-volume scan. 512 MB is comfortable; do not go
-  # below 256 MB.
+  memory = '512mb'
   cpu_kind = 'shared'
   cpus = 1
-  memory = '512mb'
+  memory_mb = 256
