@@ -61,7 +61,12 @@ class KeepAliveParsingTests(unittest.TestCase):
             self.assertEqual(app._default_keepalive_urls(), ['https://myapp.up.railway.app/healthz'])
 
     def test_default_urls_empty_without_any_hint(self):
-        env = {'KEEPALIVE_URLS': '', 'RAILWAY_PUBLIC_DOMAIN': '', 'RAILWAY_STATIC_URL': ''}
+        env = {
+            'KEEPALIVE_URLS': '',
+            'RAILWAY_PUBLIC_DOMAIN': '',
+            'RAILWAY_STATIC_URL': '',
+            'FLY_APP_NAME': '',
+        }
         with mock.patch.dict(os.environ, env):
             self.assertEqual(app._default_keepalive_urls(), [])
 

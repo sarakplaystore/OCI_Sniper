@@ -7,3 +7,6 @@ __pycache__
 .env.*
 README.md
 index.html
+# Not needed at runtime (Fly/Railway both build from this context).
+tests
+.github
