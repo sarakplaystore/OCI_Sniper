@@ -48,8 +48,22 @@ jobs:
       - name: Skip notice
         if: env.FLY_API_TOKEN == ''
         run: |
-          echo "::notice::FLY_API_TOKEN is not set, skipping deploy."
+          echo "::notice::FLY_API_TOKEN is not set, skipping deploy (forks and pull requests)."
           echo "Add a deploy token with: gh secret set FLY_API_TOKEN"
+
+      # A green run that deployed nothing is worse than a red one: this is how a
+      # missing token went unnoticed while https://<app>.fly.dev answered nothing.
+      # Only the canonical repository fails here, so forks keep passing.
+      - name: Fail when main cannot be deployed
+        if: >-
+          env.FLY_API_TOKEN == '' && github.ref == 'refs/heads/main' &&
+          github.repository == 'sarakplaystore/OCI_Sniper'
+        run: |
+          echo "::error::FLY_API_TOKEN is missing, so this run deployed nothing."
+          echo "Create a deploy token and store it as a repository secret:"
+          echo "  fly tokens create deploy -x 999999h"
+          echo "  gh secret set FLY_API_TOKEN"
+          exit 1
 
       - uses: actions/checkout@v5
         if: env.FLY_API_TOKEN != ''
@@ -63,3 +77,14 @@ jobs:
         # --ha=false creates a single Machine (the loop slot is per process), and
         # --wait-timeout makes the job fail if the Machine never passes /healthz.
         run: flyctl deploy --remote-only --ha=false --wait-timeout=5m
+
+      - name: Smoke test the public endpoint
+        if: env.FLY_API_TOKEN != ''
+        # The deploy's own health check runs inside Fly's network. This proves the
+        # app is also reachable the way a browser reaches it.
+        run: |
+          app="$(python3 -c "import tomllib; print(tomllib.load(open('fly.toml', 'rb'))['app'])")"
+          if [ -z "$app" ]; then echo "::error::could not read 'app' from fly.toml"; exit 1; fi
+          url="https://${app}.fly.dev/healthz"
+          echo "Waiting for $url"
+          curl -fsS --retry 8 --retry-all-errors --retry-delay 10 --max-time 20 "$url"

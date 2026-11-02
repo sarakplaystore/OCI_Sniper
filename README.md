@@ -82,7 +82,29 @@ Operational notes:
   with Fly's shared IPv4 — no IP allow-listing is needed on the OCI side, and OCI API keys are
   pasted into the UI per request (never stored server-side).
 - **Diagnostics:** `fly logs` (Gunicorn/stdout, keep-alive and loop lines), `fly status`,
-  `fly checks list`, `fly ssh console`, and `curl https://<app>.fly.dev/healthz`.
+  `fly checks list`, `fly ssh console`, `curl https://<app>.fly.dev/healthz`, or the one-command
+  read-only sweep in `scripts/fly-doctor.sh` (see below).
+
+### When `https://<app>.fly.dev` does not answer
+
+"Request failed", a bare 502, or a `503 no machines` means the deploy and the public URL have
+drifted apart. Run `bash scripts/fly-doctor.sh` — it is read-only and checks the fly.toml
+invariants, DNS, the deployed config, Machine count and state, health checks, secret names, recent
+logs and the public `/healthz`, then prints the next step. The table below is the same knowledge
+by symptom:
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| No response at all, `dig +short <app>.fly.dev` is empty | No Fly app is bound to that hostname: never created, destroyed, or `fly launch` picked a different name (`oci-sniper-sleepy-1234` is common) | `fly apps list`, then deploy with `--ha=false -a <real-name>` and set `app = …` in `fly.toml` |
+| 502/503 while the deploy "succeeded" | Fly's proxy is up but nothing listens on `internal_port` — usually `[env] PORT` went missing because `fly launch` regenerated `fly.toml`, so Gunicorn is on 5000 while the proxy targets 8080 | Restore `PORT = '8080'` (or point `internal_port` at your port) and redeploy; `fly logs` should show `Listening at: …:8080` and the app prints its Fly app/machine/region/port on boot |
+| Machine restarts every few seconds | Crash at boot, or OOM | `fly logs`; raise `[[vm]] memory` above 512 MB only if the logs show memory pressure |
+| Health check red, logs look healthy | The check hits a path that Basic Auth protects, or boot is slower than `grace_period` | The shipped check is `/healthz`, which bypasses `APP_PASSWORD` |
+| UI state jumps between two answers | Two Machines: `fly deploy` without `--ha=false` | `fly scale count 1` |
+| CI is green, the URL is still down | `FLY_API_TOKEN` was never set, so the deploy job skipped | `gh secret set FLY_API_TOKEN` — CI now fails on `main` instead of reporting a hollow success |
+| `git diff fly.toml` shows edits you did not make | `fly launch` rewrote the config | Revert it; the checked-in file is the intended one |
+
+CI now ends a successful deploy with a public `curl https://<app>.fly.dev/healthz`, so
+"deployed" and "reachable from the internet" are the same green check.
 
 ### Deploy from GitHub Actions (optional)
 
@@ -94,8 +116,12 @@ fly tokens create deploy -x 999999h     # deploy-scoped token
 gh secret set FLY_API_TOKEN --repo <owner>/<repo>
 ```
 
-Without the secret the workflow skips itself instead of failing. Tokens are per-app, so rotate
-them with `fly tokens revoke` when you no longer need CI deploys.
+Without the secret the deploy job skips itself on pull requests and forks. On `main` in this
+repository it **fails** with an explicit message instead, because a green run that deployed
+nothing is how a dead public URL went unnoticed before. A successful deploy then curls
+`https://<app>.fly.dev/healthz` from the runner, so the job only passes when the app is actually
+reachable. Tokens are per-app, so rotate them with `fly tokens revoke` when you no longer need CI
+deploys.
 
 
 ## Staying awake 24/7 (Railway sleeping)

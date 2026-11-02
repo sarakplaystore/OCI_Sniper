@@ -759,7 +759,38 @@ def keepalive_public_status():
     return {'enabled': enabled, 'running': bool(enabled and _keepalive_thread_running())}
 
 
+def log_deployment_hints():
+    """Say out loud how the host is wired, in the log the host shows you.
+
+    On Fly.io the one misconfiguration that looks like a dead app is the port
+    mismatch: Fly does not inject PORT, so a fly.toml without [env] PORT leaves
+    Gunicorn on 5000 while http_service.internal_port says 8080, and Fly's proxy
+    has no listener. Printing the bind expectation makes that obvious in
+    `fly logs` instead of leaving a bare 503 at the public URL.
+    """
+    if not os.environ.get(_KEEPALIVE_FLY_APP_VAR):
+        return
+    port = os.environ.get('PORT', '').strip()
+    if not port:
+        print(
+            'Fly.io: PORT is not set, so Gunicorn will bind 5000. Set [env] PORT '
+            'in fly.toml and keep http_service.internal_port equal to it, or '
+            "Fly's proxy will have no listener and the app will look dead."
+        )
+        return
+    print(
+        'Fly.io: app=%s machine=%s region=%s — expecting traffic on port %s'
+        % (
+            os.environ.get('FLY_APP_NAME', ''),
+            os.environ.get('FLY_MACHINE_ID', ''),
+            os.environ.get('FLY_REGION', ''),
+            port,
+        )
+    )
+
+
 keepalive_boot()
+log_deployment_hints()
 
 
 # ---- Boot volume manager ----
